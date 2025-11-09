@@ -1,0 +1,32 @@
+syntax = "proto3";
+package errorpb;
+
+import "metapb.proto";
+
+message Error {
+    string message = 1;
+    NotLeader not_leader = 2;
+    RegionNotFound region_not_found = 3;
+    KeyNotInRegion key_not_in_region = 4;
+    StaleEpoch stale_epoch = 5;
+}
+
+message NotLeader {
+    uint64 region_id = 1;
+    metapb.Peer leader = 2;
+}
+
+message RegionNotFound {
+    uint64 region_id = 1;
+}
+
+message KeyNotInRegion {
+    bytes key = 1;
+    uint64 region_id = 2;
+    bytes start_key = 3;
+    bytes end_key = 4;
+}
+
+message StaleEpoch {
+    repeated metapb.Region new_regions = 1;
+}
