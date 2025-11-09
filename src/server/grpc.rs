@@ -1,6 +1,6 @@
 use crate::server::Server;
 use crate::storage::Storage;
-use crate::server::RawKvServer;
+use crate::server::{RawKvServer, TransactionKvServer};
 use crate::proto::kvrpcpb::*;
 use tonic::{Request, Response, Status};
 
@@ -151,33 +151,135 @@ impl<S: Storage + Send + Sync + 'static> TinyKv for TinyKvService<S> {
         }
     }
 
-    // 事务相关方法（占位符，后续实现）
+    // 事务相关方法
     async fn kv_get(
         &self,
-        _request: Request<kvrpcpb::GetRequest>,
+        request: Request<kvrpcpb::GetRequest>,
     ) -> Result<Response<kvrpcpb::GetResponse>, Status> {
-        Err(Status::unimplemented("Not implemented yet"))
+        let req = request.into_inner();
+        
+        match TransactionKvServer::kv_get(&self.server, GetRequest {
+            context: req.context.map(|c| Context::new(c.region_id)).unwrap_or_else(|| Context::new(0)),
+            key: req.key,
+            version: req.version,
+        }).await {
+            Ok(resp) => {
+                let proto_resp = kvrpcpb::GetResponse {
+                    region_error: resp.region_error.map(|e| convert_error(e)),
+                    error: resp.error.map(|e| convert_key_error(e)),
+                    value: resp.value.unwrap_or_default(),
+                    not_found: resp.not_found,
+                };
+                Ok(Response::new(proto_resp))
+            }
+            Err(e) => Err(Status::internal(format!("Internal error: {}", e))),
+        }
     }
 
     async fn kv_scan(
         &self,
-        _request: Request<kvrpcpb::ScanRequest>,
+        request: Request<kvrpcpb::ScanRequest>,
     ) -> Result<Response<kvrpcpb::ScanResponse>, Status> {
-        Err(Status::unimplemented("Not implemented yet"))
+        let req = request.into_inner();
+        
+        match TransactionKvServer::kv_scan(&self.server, ScanRequest {
+            context: req.context.map(|c| Context::new(c.region_id)).unwrap_or_else(|| Context::new(0)),
+            start_key: req.start_key,
+            limit: req.limit,
+            version: req.version,
+        }).await {
+            Ok(resp) => {
+                let proto_pairs: Vec<kvrpcpb::KvPair> = resp.pairs
+                    .into_iter()
+                    .map(|kv| kvrpcpb::KvPair {
+                        error: kv.error.map(|e| convert_key_error(e)),
+                        key: kv.key,
+                        value: kv.value,
+                    })
+                    .collect();
+                
+                let proto_resp = kvrpcpb::ScanResponse {
+                    region_error: resp.region_error.map(|e| convert_error(e)),
+                    error: None,  // ScanResponse 在 proto 中有 error 字段，但我们的内部结构没有
+                    pairs: proto_pairs,
+                };
+                Ok(Response::new(proto_resp))
+            }
+            Err(e) => Err(Status::internal(format!("Internal error: {}", e))),
+        }
     }
 
     async fn kv_prewrite(
         &self,
-        _request: Request<kvrpcpb::PrewriteRequest>,
+        request: Request<kvrpcpb::PrewriteRequest>,
     ) -> Result<Response<kvrpcpb::PrewriteResponse>, Status> {
-        Err(Status::unimplemented("Not implemented yet"))
+        let req = request.into_inner();
+        
+        let mutations: Vec<Mutation> = req.mutations
+            .into_iter()
+            .map(|m| Mutation {
+                op: match m.op {
+                    0 => Op::Put,  // Put
+                    1 => Op::Del,  // Delete
+                    _ => Op::Put,
+                },
+                key: m.key,
+                value: m.value,
+            })
+            .collect();
+        
+        match TransactionKvServer::kv_prewrite(
+            &self.server,
+            self.server.latches(),
+            PrewriteRequest {
+                context: req.context.map(|c| Context::new(c.region_id)).unwrap_or_else(|| Context::new(0)),
+                mutations,
+                primary_lock: req.primary_lock,
+                start_version: req.start_version,
+                lock_ttl: req.lock_ttl,
+            }
+        ).await {
+            Ok(resp) => {
+                let proto_errors: Vec<kvrpcpb::KeyError> = resp.errors
+                    .into_iter()
+                    .map(|e| convert_key_error(e))
+                    .collect();
+                
+                let proto_resp = kvrpcpb::PrewriteResponse {
+                    region_error: resp.region_error.map(|e| convert_error(e)),
+                    errors: proto_errors,
+                };
+                Ok(Response::new(proto_resp))
+            }
+            Err(e) => Err(Status::internal(format!("Internal error: {}", e))),
+        }
     }
 
     async fn kv_commit(
         &self,
-        _request: Request<kvrpcpb::CommitRequest>,
+        request: Request<kvrpcpb::CommitRequest>,
     ) -> Result<Response<kvrpcpb::CommitResponse>, Status> {
-        Err(Status::unimplemented("Not implemented yet"))
+        let req = request.into_inner();
+        
+        match TransactionKvServer::kv_commit(
+            &self.server,
+            self.server.latches(),
+            CommitRequest {
+                context: req.context.map(|c| Context::new(c.region_id)).unwrap_or_else(|| Context::new(0)),
+                start_version: req.start_version,
+                keys: req.keys,
+                commit_version: req.commit_version,
+            }
+        ).await {
+            Ok(resp) => {
+                let proto_resp = kvrpcpb::CommitResponse {
+                    region_error: resp.region_error.map(|e| convert_error(e)),
+                    error: resp.error.map(|e| convert_key_error(e)),
+                };
+                Ok(Response::new(proto_resp))
+            }
+            Err(e) => Err(Status::internal(format!("Internal error: {}", e))),
+        }
     }
 }
 
