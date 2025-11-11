@@ -1,387 +1,394 @@
-use crate::proto::metapb::{Region, Peer, Store};
-use crate::proto::schedulerpb::*;
-use anyhow::{Result, anyhow};
+use crate::proto::metapb::{Peer, Region, Store};
+use crate::proto::schedulerpb::{
+    self,
+    pd_client::PdClient,
+    AskSplitRequest,
+    AskSplitResponse,
+    AllocIdRequest,
+    BootstrapRequest,
+    BootstrapResponse,
+    GetMembersRequest,
+    GetMembersResponse,
+    GetRegionByIdRequest,
+    GetRegionRequest,
+    GetRegionResponse,
+    GetStoreRequest,
+    GetStoreResponse,
+    IsBootstrappedRequest,
+    PutStoreRequest,
+    RegionHeartbeatRequest,
+    RegionHeartbeatResponse,
+    RequestHeader,
+    StoreHeartbeatRequest,
+    StoreHeartbeatResponse,
+    StoreStats,
+};
+use anyhow::{anyhow, Result};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
-use tokio::time::Duration;
-use log::{info, warn, error};
+use tokio_stream::wrappers::UnboundedReceiverStream;
+use tonic::transport::{Channel, Endpoint};
+use tonic::Request;
 
-const SCHEDULER_TIMEOUT: Duration = Duration::from_secs(1);
-const RETRY_INTERVAL: Duration = Duration::from_secs(1);
-const MAX_RETRY_COUNT: usize = 10;
-const MAX_INIT_CLUSTER_RETRIES: usize = 100;
+const HEARTBEAT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// 调度器客户端接口
 #[async_trait::async_trait]
 pub trait SchedulerClient: Send + Sync {
-    /// 获取集群 ID
     fn get_cluster_id(&self) -> u64;
-    
-    /// 创建请求头
     fn request_header(&self) -> RequestHeader;
-    
-    /// 分配 ID
     async fn alloc_id(&self) -> Result<u64>;
-    
-    /// 初始化集群
     async fn bootstrap(&self, store: &Store) -> Result<BootstrapResponse>;
-    
-    /// 检查集群是否已初始化
     async fn is_bootstrapped(&self) -> Result<bool>;
-    
-    /// 注册 Store
     async fn put_store(&self, store: &Store) -> Result<()>;
-    
-    /// 获取 Store
     async fn get_store(&self, store_id: u64) -> Result<Store>;
-    
-    /// 根据 key 获取 Region
     async fn get_region(&self, key: &[u8]) -> Result<(Region, Option<Peer>)>;
-    
-    /// 根据 Region ID 获取 Region
     async fn get_region_by_id(&self, region_id: u64) -> Result<(Region, Option<Peer>)>;
-    
-    /// 请求 Split
     async fn ask_split(&self, region: &Region) -> Result<AskSplitResponse>;
-    
-    /// Store 心跳
     async fn store_heartbeat(&self, stats: &StoreStats) -> Result<()>;
-    
-    /// Region 心跳（异步发送）
     fn region_heartbeat(&self, request: RegionHeartbeatRequest) -> Result<()>;
-    
-    /// 设置 Region 心跳响应处理器
     fn set_region_heartbeat_response_handler(
         &self,
-        store_id: u64,
         handler: Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>,
     );
-    
-    /// 关闭客户端
     async fn close(&self);
 }
 
-/// 调度器客户端实现
+#[derive(Clone)]
 pub struct Client {
-    urls: Vec<String>,
-    cluster_id: Arc<AtomicU64>,  // 改为 AtomicU64
+    inner: Arc<ClientInner>,
+}
+
+struct ClientInner {
     tag: String,
-    
-    // 心跳相关
-    region_heartbeat_tx: mpsc::UnboundedSender<RegionHeartbeatRequest>,
-    heartbeat_handler: Arc<RwLock<Option<Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>>>>,
-    
-    // 关闭信号
+    channel: Channel,
+    cluster_id: AtomicU64,
+    store_id: u64,
+    region_tx: mpsc::UnboundedSender<RegionHeartbeatRequest>,
+    response_handler: Arc<RwLock<Option<Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>>>>,
     shutdown_tx: mpsc::UnboundedSender<()>,
-    
-    // 模拟响应通道（用于测试）
-    response_tx: mpsc::UnboundedSender<RegionHeartbeatResponse>,
 }
 
 impl Client {
-    /// 创建新的调度器客户端
-    pub async fn new(urls: Vec<String>, tag: String) -> Result<Self> {
-        let urls: Vec<String> = urls.into_iter()
+    pub async fn connect(
+        endpoints: Vec<String>,
+        store_id: u64,
+        tag: String,
+    ) -> Result<Self> {
+        let normalized: Vec<String> = endpoints
+            .into_iter()
             .map(|url| {
-                if url.contains("://") {
+                if url.starts_with("http://") || url.starts_with("https://") {
                     url
                 } else {
                     format!("http://{}", url)
                 }
             })
             .collect();
-        
-        info!("[{}][scheduler] create scheduler client with endpoints {:?}", tag, urls);
-        
-        let (region_heartbeat_tx, region_heartbeat_rx) = mpsc::unbounded_channel();
-        let (shutdown_tx, shutdown_rx) = mpsc::unbounded_channel();
-        let (response_tx, mut response_rx) = mpsc::unbounded_channel();
-        
-        let cluster_id = Arc::new(AtomicU64::new(0));
-        let heartbeat_handler: Arc<RwLock<Option<Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>>>> = 
+
+        let endpoint = normalized
+            .first()
+            .ok_or_else(|| anyhow!("empty pd endpoints"))?
+            .clone();
+
+        let channel = Endpoint::from_shared(endpoint.clone())?
+            .connect()
+            .await?;
+
+        let (region_tx, region_rx) = mpsc::unbounded_channel();
+        let region_stream = UnboundedReceiverStream::new(region_rx);
+
+        let (shutdown_tx, mut shutdown_rx) = mpsc::unbounded_channel::<()>();
+        let response_handler: Arc<RwLock<Option<Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>>>> =
             Arc::new(RwLock::new(None));
-        
-        // 初始化集群 ID
-        let cluster_id_clone = cluster_id.clone();
-        let urls_clone = urls.clone();
-        let tag_clone = tag.clone();
+        let cluster_id = AtomicU64::new(0);
+
+        // 初始化 cluster_id
+        {
+            let mut client = PdClient::new(channel.clone());
+            let response = client
+                .get_members(Request::new(GetMembersRequest {
+                    header: Some(RequestHeader {
+                        cluster_id: 0,
+                        sender_id: store_id,
+                    }),
+                }))
+                .await?;
+            let inner = response.into_inner();
+            if let Some(header) = inner.header {
+                cluster_id.store(header.cluster_id, Ordering::Relaxed);
+            }
+        }
+
+        // 建立 RegionHeartbeat 流
+        let mut hb_client = PdClient::new(channel.clone());
+        let response = hb_client
+            .region_heartbeat(Request::new(region_stream))
+            .await?;
+        let mut inbound = response.into_inner();
+
+        let handler_clone = response_handler.clone();
+        let tag_for_log = tag.clone();
         tokio::spawn(async move {
-            for i in 0..MAX_RETRY_COUNT {
-                if let Ok(members) = Self::get_members_internal(&urls_clone).await {
-                    let id = members.header.as_ref()
-                        .map(|h| h.cluster_id)
-                        .unwrap_or(0);
-                    cluster_id_clone.store(id, Ordering::Relaxed);
-                    info!("[{}][scheduler] init cluster id {}", tag_clone, id);
-                    break;
-                }
-                if i < MAX_RETRY_COUNT - 1 {
-                    tokio::time::sleep(RETRY_INTERVAL).await;
+            loop {
+                tokio::select! {
+                    _ = shutdown_rx.recv() => {
+                        log::info!("{}: heartbeat loop shutdown", tag_for_log);
+                        break;
+                    }
+                    msg = inbound.message() => {
+                        match msg {
+                            Ok(Some(resp)) => {
+                                if let Ok(handler) = handler_clone.read() {
+                                    if let Some(cb) = handler.as_ref() {
+                                        cb(resp);
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(err) => {
+                                log::error!("heartbeat stream error: {}", err);
+                                break;
+                            }
+                        }
+                    }
                 }
             }
         });
-        
-        // 启动心跳流处理
-        let heartbeat_handler_clone = heartbeat_handler.clone();
-        let tag_clone2 = tag.clone();
-        
-        let client = Self {
-            urls,
-            cluster_id: cluster_id.clone(),
-            tag: tag.clone(),
-            region_heartbeat_tx,
-            heartbeat_handler: heartbeat_handler.clone(),
+
+        let inner = Arc::new(ClientInner {
+            tag,
+            channel,
+            cluster_id,
+            store_id,
+            region_tx,
+            response_handler,
             shutdown_tx,
-            response_tx: response_tx.clone(),
-        };
-        
-        // 启动心跳流循环（传递需要的字段，而不是整个 client）
-        let cluster_id_for_loop = cluster_id.clone();
-        let response_tx_for_loop = response_tx.clone();
-        tokio::spawn(async move {
-            Self::heartbeat_stream_loop(
-                region_heartbeat_rx,
-                heartbeat_handler_clone,
-                shutdown_rx,
-                tag_clone2,
-                cluster_id_for_loop,
-                response_tx_for_loop,
-            ).await;
         });
-        
-        // 启动响应处理循环
-        let handler_for_response = heartbeat_handler.clone();
-        tokio::spawn(async move {
-            while let Some(resp) = response_rx.recv().await {
-                if let Ok(handler_guard) = handler_for_response.read() {
-                    if let Some(handler) = handler_guard.as_ref() {
-                        handler(resp);
-                    }
-                }
-            }
-        });
-        
-        Ok(client)
+
+        Ok(Self { inner })
     }
-    
-    /// 获取成员信息（内部实现）
-    async fn get_members_internal(_urls: &[String]) -> Result<GetMembersResponse> {
-        // 模拟实现：返回一个模拟的响应
-        // 在实际环境中，这里应该调用真实的 gRPC 服务
-        Ok(GetMembersResponse {
-            header: Some(ResponseHeader {
-                cluster_id: 1,
-                error: None,
-            }),
-            members: vec![Member {
-                member_id: 1,
-                client_urls: vec!["http://127.0.0.1:2379".to_string()],
-                peer_urls: vec!["http://127.0.0.1:2380".to_string()],
-            }],
-            leader: Some(Member {
-                member_id: 1,
-                client_urls: vec!["http://127.0.0.1:2379".to_string()],
-                peer_urls: vec!["http://127.0.0.1:2380".to_string()],
-            }),
-        })
+
+    fn new_pd_client(&self) -> PdClient<Channel> {
+        PdClient::new(self.inner.channel.clone())
     }
-    
-    /// 心跳流处理循环
-    async fn heartbeat_stream_loop(
-        mut region_heartbeat_rx: mpsc::UnboundedReceiver<RegionHeartbeatRequest>,
-        _heartbeat_handler: Arc<RwLock<Option<Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>>>>,
-        mut shutdown_rx: mpsc::UnboundedReceiver<()>,
-        tag: String,
-        cluster_id: Arc<AtomicU64>,
-        response_tx: mpsc::UnboundedSender<RegionHeartbeatResponse>,
-    ) {
-        info!("[{}][scheduler] heartbeat stream loop started", tag);
-        
-        loop {
-            tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    info!("[{}][scheduler] heartbeat stream loop shutdown", tag);
-                    break;
-                }
-                
-                request = region_heartbeat_rx.recv() => {
-                    match request {
-                        Some(req) => {
-                            // 处理心跳请求
-                            Self::process_heartbeat_request(
-                                &cluster_id,
-                                &response_tx,
-                                req,
-                                &tag,
-                            ).await;
-                        }
-                        None => {
-                            warn!("[{}][scheduler] heartbeat channel closed", tag);
-                            break;
-                        }
-                    }
-                }
-                
-                // 定期检查（用于保持循环活跃）
-                _ = tokio::time::sleep(Duration::from_secs(10)) => {
-                    // 定期检查，保持循环活跃
-                    info!("[{}][scheduler] heartbeat stream loop still alive", tag);
-                }
-            }
+
+    fn update_cluster_id(&self, header: &Option<schedulerpb::ResponseHeader>) {
+        if let Some(h) = header {
+            self.inner.cluster_id.store(h.cluster_id, Ordering::Relaxed);
         }
     }
-    
-    /// 处理心跳请求（模拟实现）
-    async fn process_heartbeat_request(
-        cluster_id: &Arc<AtomicU64>,
-        response_tx: &mpsc::UnboundedSender<RegionHeartbeatResponse>,
-        request: RegionHeartbeatRequest,
-        tag: &str,
-    ) {
-        // 模拟处理心跳请求
-        if let Some(region) = &request.region {
-            info!("[{}][scheduler] processing heartbeat for region {}", tag, region.id);
-            
-            // 模拟生成响应
-            let response = RegionHeartbeatResponse {
-                header: Some(ResponseHeader {
-                    cluster_id: cluster_id.load(Ordering::Relaxed),
-                    error: None,
-                }),
-                change_peer: None,
-                transfer_leader: None,
-                region_id: region.id,
-                region_epoch: Some(region.region_epoch.clone()),
-                target_peer: None,
-            };
-            
-            // 发送响应到响应通道
-            if let Err(e) = response_tx.send(response) {
-                error!("[{}][scheduler] failed to send heartbeat response: {:?}", tag, e);
-            }
+
+    fn encode_store(&self, store: &Store) -> crate::proto::metapb::Store {
+        // 转换为 schedulerpb 需要的格式
+        // 由于使用了 extern_path，schedulerpb 中的 metapb 类型实际上就是 crate::proto::metapb
+        crate::proto::metapb::Store {
+            id: store.id,
+            address: store.address.clone(),
+            state: store.state,
         }
     }
-    
-    /// 执行请求（带重试）
-    async fn do_request<F, T>(&self, f: F) -> Result<T>
-    where
-        F: Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send>>,
-    {
-        let mut last_err = None;
-        for _ in 0..MAX_RETRY_COUNT {
-            match tokio::time::timeout(SCHEDULER_TIMEOUT, f()).await {
-                Ok(Ok(result)) => return Ok(result),
-                Ok(Err(e)) => {
-                    last_err = Some(e);
-                    tokio::time::sleep(RETRY_INTERVAL).await;
-                }
-                Err(_) => {
-                    last_err = Some(anyhow!("timeout"));
-                    tokio::time::sleep(RETRY_INTERVAL).await;
-                }
-            }
+
+    fn encode_peer(&self, peer: &Peer) -> crate::proto::metapb::Peer {
+        crate::proto::metapb::Peer {
+            id: peer.id,
+            store_id: peer.store_id,
         }
-        Err(last_err.unwrap_or_else(|| anyhow!("failed too many times")))
     }
-    
+
+    fn encode_region(&self, region: &Region) -> crate::proto::metapb::Region {
+        crate::proto::metapb::Region {
+            id: region.id,
+            start_key: region.start_key.clone(),
+            end_key: region.end_key.clone(),
+            region_epoch: region.region_epoch.clone(),
+            peers: region.peers.iter().map(|p| self.encode_peer(p)).collect(),
+        }
+    }
+
+    fn decode_store(&self, store: crate::proto::metapb::Store) -> Store {
+        Store {
+            id: store.id,
+            address: store.address,
+            state: store.state,
+        }
+    }
+
+    fn decode_peer(&self, peer: crate::proto::metapb::Peer) -> Peer {
+        Peer {
+            id: peer.id,
+            store_id: peer.store_id,
+        }
+    }
+
+    fn decode_region(&self, region: crate::proto::metapb::Region) -> Region {
+        Region {
+            id: region.id,
+            start_key: region.start_key,
+            end_key: region.end_key,
+            region_epoch: region.region_epoch,
+            peers: region.peers.into_iter().map(|p| self.decode_peer(p)).collect(),
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl SchedulerClient for Client {
     fn get_cluster_id(&self) -> u64 {
-        self.cluster_id.load(Ordering::Relaxed)  // 改为 load
+        self.inner.cluster_id.load(Ordering::Relaxed)
     }
-    
+
     fn request_header(&self) -> RequestHeader {
         RequestHeader {
-            cluster_id: self.cluster_id.load(Ordering::Relaxed),  // 改为 load
+            cluster_id: self.get_cluster_id(),
+            sender_id: self.inner.store_id,
         }
     }
-    
+
     async fn alloc_id(&self) -> Result<u64> {
-        // TODO: 实现实际的 gRPC 调用
-        Ok(rand::random::<u64>())
+        let mut client = self.new_pd_client();
+        let resp = client
+            .alloc_id(Request::new(AllocIdRequest {
+                header: Some(self.request_header()),
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        Ok(inner.id)
     }
-    
-    async fn bootstrap(&self, _store: &Store) -> Result<BootstrapResponse> {
-        // TODO: 实现实际的 gRPC 调用
-        Ok(BootstrapResponse {
-            header: Some(ResponseHeader {
-                cluster_id: self.get_cluster_id(),
-                error: None,
-            }),
-        })
+
+    async fn bootstrap(&self, store: &Store) -> Result<BootstrapResponse> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .bootstrap(Request::new(BootstrapRequest {
+                header: Some(self.request_header()),
+                store: Some(self.encode_store(store)),
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        Ok(inner)
     }
-    
+
     async fn is_bootstrapped(&self) -> Result<bool> {
-        // TODO: 实现实际的 gRPC 调用
-        Ok(false)
+        let mut client = self.new_pd_client();
+        let resp = client
+            .is_bootstrapped(Request::new(IsBootstrappedRequest {
+                header: Some(self.request_header()),
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        Ok(inner.bootstrapped)
     }
-    
-    async fn put_store(&self, _store: &Store) -> Result<()> {
-        // TODO: 实现实际的 gRPC 调用
+
+    async fn put_store(&self, store: &Store) -> Result<()> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .put_store(Request::new(PutStoreRequest {
+                header: Some(self.request_header()),
+                store: Some(self.encode_store(store)),
+            }))
+            .await?;
+        self.update_cluster_id(&resp.into_inner().header);
         Ok(())
     }
-    
-    async fn get_store(&self, _store_id: u64) -> Result<Store> {
-        // TODO: 实现实际的 gRPC 调用
-        Err(anyhow!("not implemented"))
+
+    async fn get_store(&self, store_id: u64) -> Result<Store> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .get_store(Request::new(GetStoreRequest {
+                header: Some(self.request_header()),
+                store_id,
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        inner
+            .store
+            .map(|s| self.decode_store(s))
+            .ok_or_else(|| anyhow!("store not found"))
     }
-    
-    async fn get_region(&self, _key: &[u8]) -> Result<(Region, Option<Peer>)> {
-        // TODO: 实现实际的 gRPC 调用
-        Err(anyhow!("not implemented"))
+
+    async fn get_region(&self, key: &[u8]) -> Result<(Region, Option<Peer>)> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .get_region(Request::new(GetRegionRequest {
+                header: Some(self.request_header()),
+                region_key: key.to_vec(),
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+
+        let region = inner
+            .region
+            .map(|r| self.decode_region(r))
+            .ok_or_else(|| anyhow!("region not found"))?;
+        let leader = inner.leader.map(|p| self.decode_peer(p));
+        Ok((region, leader))
     }
-    
-    async fn get_region_by_id(&self, _region_id: u64) -> Result<(Region, Option<Peer>)> {
-        // TODO: 实现实际的 gRPC 调用
-        Err(anyhow!("not implemented"))
+
+    async fn get_region_by_id(&self, region_id: u64) -> Result<(Region, Option<Peer>)> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .get_region_by_id(Request::new(GetRegionByIdRequest {
+                header: Some(self.request_header()),
+                region_id,
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        let region = inner
+            .region
+            .map(|r| self.decode_region(r))
+            .ok_or_else(|| anyhow!("region not found"))?;
+        let leader = inner.leader.map(|p| self.decode_peer(p));
+        Ok((region, leader))
     }
-    
-    async fn ask_split(&self, _region: &Region) -> Result<AskSplitResponse> {
-        // TODO: 实现实际的 gRPC 调用
-        Ok(AskSplitResponse {
-            header: Some(ResponseHeader {
-                cluster_id: self.get_cluster_id(),
-                error: None,
-            }),
-            new_region_id: rand::random::<u64>(),
-            new_peer_ids: vec![rand::random::<u64>()],
-        })
+
+    async fn ask_split(&self, region: &Region) -> Result<AskSplitResponse> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .ask_split(Request::new(AskSplitRequest {
+                header: Some(self.request_header()),
+                region: Some(self.encode_region(region)),
+            }))
+            .await?;
+        let inner = resp.into_inner();
+        self.update_cluster_id(&inner.header);
+        Ok(inner)
     }
-    
-    async fn store_heartbeat(&self, _stats: &StoreStats) -> Result<()> {
-        // TODO: 实现实际的 gRPC 调用
+
+    async fn store_heartbeat(&self, stats: &StoreStats) -> Result<()> {
+        let mut client = self.new_pd_client();
+        let resp = client
+            .store_heartbeat(Request::new(StoreHeartbeatRequest {
+                header: Some(self.request_header()),
+                stats: Some(stats.clone()),
+            }))
+            .await?;
+        self.update_cluster_id(&resp.into_inner().header);
         Ok(())
     }
-    
+
     fn region_heartbeat(&self, request: RegionHeartbeatRequest) -> Result<()> {
-        self.region_heartbeat_tx.send(request)
-            .map_err(|e| anyhow!("failed to send region heartbeat: {:?}", e))
+        self.inner
+            .region_tx
+            .send(request)
+            .map_err(|e| anyhow!("send region heartbeat failed: {}", e))
     }
-    
+
     fn set_region_heartbeat_response_handler(
         &self,
-        _store_id: u64,
         handler: Box<dyn Fn(RegionHeartbeatResponse) + Send + Sync>,
     ) {
-        if let Ok(mut handler_guard) = self.heartbeat_handler.write() {
-            *handler_guard = Some(handler);
+        if let Ok(mut slot) = self.inner.response_handler.write() {
+            *slot = Some(handler);
         }
     }
-    
-    async fn close(&self) {
-        let _ = self.shutdown_tx.send(());
-    }
-}
 
-impl std::fmt::Debug for Client {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Client")
-            .field("urls", &self.urls)
-            .field("cluster_id", &self.cluster_id.load(Ordering::Relaxed))
-            .field("tag", &self.tag)
-            .finish_non_exhaustive()
+    async fn close(&self) {
+        let _ = self.inner.shutdown_tx.send(());
     }
 }

@@ -41,11 +41,11 @@ impl StoreInfo {
     }
 
     pub fn state(&self) -> StoreState {
-        self.meta.state
+        StoreState::from_i32(self.meta.state).unwrap_or(StoreState::Up)
     }
 
     pub fn is_up(&self) -> bool {
-        self.meta.state == StoreState::Up
+        self.state() == StoreState::Up
     }
 
     pub fn leader_count(&self) -> usize {

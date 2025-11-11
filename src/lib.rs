@@ -8,6 +8,7 @@ pub mod raft;
 pub mod raftstore;
 pub mod scheduler;
 pub mod transaction;
+pub mod pd;
 
 pub use config::Config;
 pub use storage::{Storage, StorageReader, StandaloneStorage, Modify, Put, Delete};

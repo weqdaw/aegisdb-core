@@ -39,6 +39,18 @@ impl SimpleHeartbeatStreams {
         let mut messages = self.sent_messages.write();
         messages.clear();
     }
+
+    /// 解绑 store 的心跳流
+    pub fn unbind_stream(&self, store_id: u64) {
+        let mut streams = self.streams.write();
+        streams.remove(&store_id);
+    }
+
+    /// 检查是否有绑定的流
+    pub fn has_stream(&self, store_id: u64) -> bool {
+        let streams = self.streams.read();
+        streams.contains_key(&store_id)
+    }
 }
 
 impl HeartbeatStreams for SimpleHeartbeatStreams {

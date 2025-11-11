@@ -31,6 +31,14 @@ enum Commands {
         /// Database path (default: /tmp/aegisdb)
         #[arg(short, long, default_value = "/tmp/aegisdb")]
         db_path: String,
+
+        /// Admin HTTP address (default: 0.0.0.0:8080)
+        #[arg(long, default_value = "0.0.0.0:8080")]
+        admin_addr: String,
+
+        /// Cluster ID for this process to report (default: 0)
+        #[arg(long, default_value = "0")]
+        cluster_id: u64,
     },
     /// Start the AegisDB CLI client
     Cli {
@@ -47,8 +55,8 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     
     match cli.command {
-        Commands::Run { addr, db_path } => {
-            run_server(addr, db_path).await?;
+        Commands::Run { addr, db_path, admin_addr, cluster_id } => {
+            run_server(addr, db_path, admin_addr, cluster_id).await?;
         }
         Commands::Cli { addr } => {
             run_cli(addr).await?;
@@ -58,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn run_server(addr: String, db_path: String) -> anyhow::Result<()> {
+async fn run_server(addr: String, db_path: String, admin_addr: String, cluster_id: u64) -> anyhow::Result<()> {
     println!(" ________  _______   ________  ___  ________  ________  ________     ");
     println!("|\\   __  \\|\\  ___ \\ |\\   ____\\|\\  \\|\\   ____\\|\\   ___ \\|\\   __  \\    ");
     println!("\\ \\  \\|\\  \\ \\   __/|\\ \\  \\___|\\ \\  \\ \\  \\___|\\ \\  \\_|\\ \\ \\  \\|\\ /_   ");
@@ -88,18 +96,143 @@ async fn run_server(addr: String, db_path: String) -> anyhow::Result<()> {
     // 创建服务器
     let server = Server::new(storage);
     let service = TinyKvService::new(server);
-    
-    // 启动 gRPC 服务器
+
+    // ========== 管理 HTTP 服务与调度组件（用于前端面板） ==========
+    use std::sync::Arc;
+    use aegisdb::server::admin_http::{AppState, serve};
+    use aegisdb::scheduler::cluster::BasicCluster;
+    use aegisdb::scheduler::coordinator::Coordinator;
+    use aegisdb::scheduler::heartbeat_streams::SimpleHeartbeatStreams;
+    use aegisdb::scheduler::operator_controller::OperatorController;
+    use aegisdb::scheduler::schedulers::{BalanceRegionScheduler, BalanceLeaderScheduler};
+    use aegisdb::raftstore::store_balancer::StoreLoad;
+
+    // BasicCluster
+    let cluster = Arc::new(BasicCluster::new());
+
+    // Heartbeat streams and OperatorController
+    let hb_streams = Arc::new(SimpleHeartbeatStreams::new());
+    let op_controller = Arc::new(OperatorController::new(cluster.clone(), hb_streams.clone()));
+
+    // Coordinator with schedulers
+    let coordinator = Arc::new(Coordinator::new(cluster.clone(), op_controller.clone()));
+    coordinator.register_scheduler(Box::new(BalanceRegionScheduler::new(std::time::Duration::from_secs(30))));
+    coordinator.register_scheduler(Box::new(BalanceLeaderScheduler::new(std::time::Duration::from_secs(30))));
+    coordinator.start().await;
+
+    // Store loads view (simple snapshot; expect to be filled by real heartbeats)
+    let store_loads = Arc::new(parking_lot::RwLock::new(Vec::<StoreLoad>::new()));
+
+    // cluster id source (from CLI flag)
+    let get_cluster_id = {
+        let cid = cluster_id;
+        Arc::new(move || cid) as Arc<dyn Fn() -> u64 + Send + Sync>
+    };
+
+    // Start admin http server in background
+    let store_loads_for_admin = store_loads.clone();
+    let admin_state = AppState {
+        cluster: cluster.clone(),
+        coordinator: coordinator.clone(),
+        get_cluster_id,
+        store_loads: store_loads_for_admin,
+    };
+    let admin_bind = admin_addr.clone();
+    tokio::spawn(async move {
+        if let Err(e) = serve(admin_state, &admin_bind).await {
+            eprintln!("admin http server failed: {}", e);
+        }
+    });
+
+    // ========== 真实链路：注册本 Store 并启动心跳，填充 BasicCluster ==========
+    {
+        use aegisdb::proto::metapb::{Store, StoreState, Region, Peer, RegionEpoch};
+        use aegisdb::scheduler::cluster::{StoreInfo, RegionInfo};
+        use std::time::Duration;
+
+        // 以 gRPC 端口作为唯一性生成 store_id（127.0.0.1:20160 -> 20160）
+        let store_id = addr
+            .split(':')
+            .last()
+            .and_then(|p| p.parse::<u64>().ok())
+            .unwrap_or(20160);
+
+        // 注册 Store（UP）
+        let store_meta = Store {
+            id: store_id,
+            address: addr.clone(),
+            state: StoreState::Up,
+        };
+        cluster.put_store(StoreInfo::new(store_meta.clone()));
+
+        // 为每个节点初始化一个基础 Region（leader 在本 store），用于让 UI 有真实链路数据
+        // region_id 规则：store_id * 10 + 1，peer_id：store_id * 100 + 1
+        let base_region = {
+            let region = Region {
+                id: store_id * 10 + 1,
+                start_key: b"a".to_vec(),
+                end_key: b"".to_vec(),
+                region_epoch: RegionEpoch::new(1, 1),
+                peers: vec![Peer { id: store_id * 100 + 1, store_id }],
+            };
+            let mut info = RegionInfo::new(
+                region,
+                Some(Peer { id: store_id * 100 + 1, store_id }),
+            );
+            info.set_approximate_size(8 * 1024 * 1024);
+            info
+        };
+        cluster.put_region(base_region.clone());
+
+        // 心跳：周期性刷新 Region 和 Store 视图到 BasicCluster 与 store_loads（模拟真实上报）
+        let cluster_clone = cluster.clone();
+        let store_loads_clone = store_loads.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(5));
+            // 简单波动的近似 region size
+            let mut size: u64 = 8 * 1024 * 1024;
+            loop {
+                tick.tick().await;
+
+                // 模拟 region size 变化（在 6~14MB 之间抖动）
+                let delta: i64 = if (size / (1024 * 1024)) % 2 == 0 { 1024 * 512 } else { -(1024 as i64) * 256 };
+                let new_size = (size as i64 + delta).clamp(6 * 1024 * 1024, 14 * 1024 * 1024) as u64;
+                size = new_size;
+
+                // 更新 region 视图
+                let mut region_updated = base_region.clone();
+                region_updated.set_approximate_size(size);
+                cluster_clone.put_region(region_updated);
+
+                // 根据 BasicCluster 的统计，更新 store_loads 对外展示（Admin 面板的 /api/storeloads）
+                // 注意：BasicCluster 会在 put_region 时自动回填每个 store 的统计
+                {
+                    let stores = cluster_clone.get_stores();
+                    let mut loads = store_loads_clone.write();
+                    loads.clear();
+                    for s in stores {
+                        let mut load = StoreLoad::new(s.id());
+                        load.update(s.region_count(), s.leader_count(), s.region_size(), s.leader_size());
+                        load.is_up = s.is_up();
+                        loads.push(load);
+                    }
+                }
+            }
+        });
+    }
+
+    // ========== 启动 gRPC 服务器 ==========
     let addr: SocketAddr = addr.parse()?;
-    println!("AegisDB server listening on {}", addr);
+    println!("AegisDB gRPC server listening on {}", addr);
+    println!("Admin HTTP listening on {}", admin_addr);
     println!("Press Ctrl+C to stop the server");
     println!();
-    
+
     TonicServer::builder()
         .add_service(aegisdb::server::grpc::tinykvpb::tiny_kv_server::TinyKvServer::new(service))
         .serve(addr)
         .await?;
-    
+
     Ok(())
 }
 

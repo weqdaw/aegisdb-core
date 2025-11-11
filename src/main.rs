@@ -1,3 +1,5 @@
+mod server;
+
 
 use aegisdb::{Config, StandaloneStorage, Storage, Modify, Put, Delete, Server, RawKvServer, MultiLevelKvServer, TransactionKvServer};
 use aegisdb::proto::kvrpcpb::*;

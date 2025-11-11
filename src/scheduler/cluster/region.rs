@@ -64,8 +64,8 @@ impl RegionInfo {
         self.approximate_size = size;
     }
 
-    pub fn epoch(&self) -> &RegionEpoch {
-        &self.region.region_epoch
+    pub fn epoch(&self) -> RegionEpoch {
+        self.region.region_epoch.clone().unwrap_or_default()
     }
 
     pub fn region(&self) -> &Region {

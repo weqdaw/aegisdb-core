@@ -86,7 +86,7 @@ impl PeerMsgHandler {
                     msg_type: MsgType::SplitRegion,
                     region_id: region.id,
                     data: MsgData::SplitRegion {
-                        region_epoch: region.region_epoch.clone(),
+                        region_epoch: region.region_epoch.clone().unwrap_or_default(),
                         split_key,
                         callback: None,
                     },
@@ -148,7 +148,7 @@ impl PeerMsgHandler {
         }
         
         let region = self.peer.region();
-        let latest_epoch = &region.region_epoch;
+        let latest_epoch = region.region_epoch.clone().unwrap_or_default();
         
         if latest_epoch.version != epoch.version {
             return Err(anyhow::anyhow!("epoch changed"));

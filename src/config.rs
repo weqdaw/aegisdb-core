@@ -8,6 +8,7 @@ pub struct Config {
     pub scheduler_addr: String,
     pub log_level: String,
     pub db_path: String,
+    pub pd_endpoints: Vec<String>,
     
     // Raft configuration
     pub raft_base_tick_interval: Duration,
@@ -44,6 +45,7 @@ impl Config {
             scheduler_addr: "127.0.0.1:2379".to_string(),
             log_level: Self::get_log_level(),
             db_path: "/tmp/aegisdb".to_string(),
+            pd_endpoints: vec!["http://127.0.0.1:2379".to_string()],
             raft_base_tick_interval: Duration::from_secs(1),
             raft_heartbeat_ticks: 2,
             raft_election_timeout_ticks: 10,
@@ -64,6 +66,7 @@ impl Config {
             scheduler_addr: "127.0.0.1:2379".to_string(),
             log_level: Self::get_log_level(),
             db_path: "/tmp/aegisdb_test".to_string(),
+            pd_endpoints: vec!["http://127.0.0.1:2379".to_string()],
             raft_base_tick_interval: Duration::from_millis(50),
             raft_heartbeat_ticks: 2,
             raft_election_timeout_ticks: 10,

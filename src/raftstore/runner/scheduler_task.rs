@@ -58,7 +58,7 @@ impl SchedulerTaskHandler {
         let handler = Box::new(move |resp: RegionHeartbeatResponse| {
             Self::on_region_heartbeat_response(store_id, resp);
         });
-        client.set_region_heartbeat_response_handler(store_id, handler);
+        client.set_region_heartbeat_response_handler(handler);
     }
     
     /// 处理 Region 心跳响应
@@ -107,7 +107,7 @@ impl SchedulerTaskHandler {
         // 发送到 Raft
         self.send_admin_request(
             task.region.id,
-            task.region.region_epoch.clone(),
+            task.region.region_epoch.clone().unwrap_or_default(),
             task.peer,
             admin_request,
             task.callback,

@@ -1,6 +1,6 @@
 // aegisdb/src/server/epoch.rs
 use crate::proto::metapb::{Region, RegionEpoch};
-use crate::proto::errorpb::Error;
+use crate::proto::errorpb::{self, Error};
 
 /// 检查 RegionEpoch 是否匹配
 /// 
@@ -15,18 +15,37 @@ pub fn check_region_epoch(
         return Ok(());
     };
 
-    let current_epoch = &current_region.region_epoch;
+    // 当前 region 若没有携带 epoch，则不判错（兼容）
+    let Some(current_epoch) = current_region.region_epoch.as_ref() else {
+        return Ok(());
+    };
 
     // 检查版本是否匹配
     // 对于 RawKV API，主要检查 version
     if req_epoch.version != current_epoch.version {
-        return Err(Error::epoch_not_match(vec![current_region.clone()]));
+        return Err(Error {
+            message: String::new(),
+            not_leader: None,
+            region_not_found: None,
+            key_not_in_region: None,
+            stale_epoch: Some(errorpb::StaleEpoch {
+                new_regions: vec![current_region.clone()],
+            }),
+        });
     }
 
     // 可选：也检查 conf_ver（配置版本）
     // 在 standalone 模式下通常不需要
     if req_epoch.conf_ver != current_epoch.conf_ver {
-        return Err(Error::epoch_not_match(vec![current_region.clone()]));
+        return Err(Error {
+            message: String::new(),
+            not_leader: None,
+            region_not_found: None,
+            key_not_in_region: None,
+            stale_epoch: Some(errorpb::StaleEpoch {
+                new_regions: vec![current_region.clone()],
+            }),
+        });
     }
 
     Ok(())

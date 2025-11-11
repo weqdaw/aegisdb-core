@@ -4,6 +4,7 @@ use crate::engine_util::{Engines, WriteBatch, get_cf};
 use crate::raft::types::Entry;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
+use prost::Message;
 
 /// Peer 状态
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,7 +17,7 @@ pub enum PeerState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionLocalState {
     pub state: PeerState,
-    pub region: Region,
+    pub region_bytes: Vec<u8>,
 }
 
 /// Raft 本地状态
@@ -51,7 +52,9 @@ pub struct RaftTruncatedState {
 
 impl RegionLocalState {
     pub fn new(region: Region, state: PeerState) -> Self {
-        Self { state, region }
+        let mut buf = Vec::new();
+        region.encode(&mut buf).unwrap();
+        Self { state, region_bytes: buf }
     }
 }
 
@@ -61,10 +64,9 @@ pub fn write_region_state(
     region: &Region,
     state: PeerState,
 ) -> Result<()> {
-    let region_state = RegionLocalState {
-        state,
-        region: region.clone(),
-    };
+    let mut buf = Vec::new();
+    region.encode(&mut buf)?;
+    let region_state = RegionLocalState { state, region_bytes: buf };
     let key = region_state_key(region.id);
     let value = bincode::serialize(&region_state)?;
     // 直接使用原始 key，因为这是元数据，不需要 CF 前缀

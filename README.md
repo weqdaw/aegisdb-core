@@ -469,6 +469,33 @@ cargo test test_raw_kv
 cargo test --test integration_test
 ```
 
+### 单机构建多节点分布式集群原理
+- 基础结构
+  
+  - **PD 服务端**: `pd_server` 启动 gRPC（`PdService`）+ HTTP（`/api/*`）两个接口，所有集群元信息都维护在 `PdState`。
+  - **客户端侧 Store**: 用 `scheduler_client::Client` 作为“Store 节点”与 PD 的 gRPC 通信端，每个 Store 持唯一 `store_id`。
+- 启动 10 个 Store 节点
+  
+  - 可执行程序 `launch_10stores` 在同一进程内创建 10 个独立的 PD 客户端实例，`store_id` 为 1..10，每个都 `connect()` 到 PD。
+  - `store_id=1` 调用 `bootstrap` 完成集群初始化；`store_id=2..10` 调用 `put_store` 注册到 PD（形成 10 个 Store 元数据）。
+- 心跳与状态维持
+  
+  - 每个 Store 启 2 类心跳：
+    - `store_heartbeat`（普通 RPC）：上报容量、使用量、region/leader 统计。
+    - `region_heartbeat`（双向流）：周期性发送本 Store 所属 region 的信息与 leader 情况。
+  - 客户端在 `connect()` 时预先建立 `region_heartbeat` 流，并把待发送的心跳放进一个 `mpsc` 无界队列，后台任务不断把消息写入流。
+  - 服务器端 `region_heartbeat` 会“立即返回响应流”，并在后台任务里：
+    - 读取客户端流的首条带 `header` 的消息，取出 `sender_id=store_id`，将该 gRPC 流与该 `store_id` 进行绑定（用于后续下发调度/指令）。
+    - 持续处理该 Store 的 region 心跳，更新 `PdState` 中的 region/leader 拓扑与统计。
+- 可视化与验证
+  
+  - HTTP 接口（`/api/stores`、`/api/regions`、`/api/storeloads` 等）直接从 `PdState` 读取快照，因而能看到 10 个 Store 和其心跳推导出的统计。
+  - `launch_10stores` 为每个 Store 构造了一个示例 Region，并每 2 秒发送一次 store/region 心跳，确保面板数据持续更新。
+- 关键点
+  
+  - “10 个节点”并不是 10 个进程，而是一个进程内 10 个独立的 PD 客户端实例，彼此使用不同的 `store_id`，通过 gRPC 与 PD 持久心跳，相当于“模拟 10 台 Store 上线”。
+  - `region_heartbeat` 的实现采用“先返回流、后台绑定”的模式，避免客户端连接阶段被阻塞，从而能顺利完成 `bootstrap/put_store`，之后再用首条心跳将流与 `store_id` 关联。
+
 ## 致谢
 项目的部分代码参考以下项目，感谢开发者的贡献
 - [TiKV](https://github.com/tikv/tikv)

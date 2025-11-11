@@ -41,6 +41,23 @@ pub struct OperatorController {
 }
 
 impl OperatorController {
+    /// 运行中操作数量
+    pub fn running_len(&self) -> usize {
+        let operators = self.operators.read();
+        operators.len()
+    }
+
+    /// 待处理操作数量（当前简化实现为 0）
+    pub fn pending_len(&self) -> usize {
+        0
+    }
+
+    /// 已完成（含成功/超时/取消/替换记录）的操作数量
+    pub fn finished_len(&self) -> usize {
+        let op_records = self.op_records.read();
+        op_records.len()
+    }
+
     /// 创建新的 OperatorController
     pub fn new(cluster: Arc<BasicCluster>, hb_streams: Arc<dyn HeartbeatStreams>) -> Self {
         Self {
@@ -325,7 +342,7 @@ impl OperatorController {
                         id: add_peer.peer_id,
                         store_id: add_peer.to_store,
                     }),
-                    change_type: ConfChangeType::AddNode as i32,
+                    change_type: ConfChangeType::AddNode as u32,
                 });
             }
         } else if let Some(remove_peer) = step.as_any().downcast_ref::<RemovePeer>() {
@@ -333,7 +350,7 @@ impl OperatorController {
             if let Some(peer) = region.get_peer_by_store_id(remove_peer.from_store) {
                 response.change_peer = Some(ChangePeer {
                     peer: Some(peer.clone()),
-                    change_type: ConfChangeType::RemoveNode as i32,
+                    change_type: ConfChangeType::RemoveNode as u32,
                 });
             }
         }
@@ -390,5 +407,26 @@ impl OperatorController {
                 status,
             },
         );
+    }
+}
+
+/// Extension trait for OperatorController to provide len_* methods
+pub trait OperatorControllerExt {
+    fn len_running(&self) -> usize;
+    fn len_pending(&self) -> usize;
+    fn len_finished(&self) -> usize;
+}
+
+impl OperatorControllerExt for OperatorController {
+    fn len_running(&self) -> usize {
+        self.running_len()
+    }
+
+    fn len_pending(&self) -> usize {
+        self.pending_len()
+    }
+
+    fn len_finished(&self) -> usize {
+        self.finished_len()
     }
 }

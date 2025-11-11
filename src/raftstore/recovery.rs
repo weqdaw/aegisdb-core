@@ -2,6 +2,7 @@ use crate::engine_util::Engines;
 use crate::raftstore::meta::{get_region_local_state, decode_region_meta_key, REGION_META_PREFIX, PeerState};
 use crate::proto::metapb::Region;
 use anyhow::Result;
+use prost::Message;
 
 /// 从持久化存储恢复所有 Region
 pub fn recover_regions(
@@ -45,7 +46,7 @@ pub fn recover_regions(
                     }
                     
                     // 检查该 region 是否属于当前 store（检查 peers）
-                    let region = &region_state.region;
+                    let region = Region::decode(&*region_state.region_bytes)?;
                     let belongs_to_store = region.peers.iter().any(|p| p.store_id == store_id);
                     
                     if belongs_to_store {
@@ -115,7 +116,7 @@ mod tests {
             id: 1,
             start_key: b"a".to_vec(),
             end_key: b"m".to_vec(),
-            region_epoch: RegionEpoch::new(1, 1),
+            region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
             peers: vec![Peer {
                 id: 1,
                 store_id: 1,
@@ -126,7 +127,7 @@ mod tests {
             id: 2,
             start_key: b"m".to_vec(),
             end_key: vec![],
-            region_epoch: RegionEpoch::new(1, 1),
+            region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
             peers: vec![Peer {
                 id: 2,
                 store_id: 1,
@@ -154,7 +155,7 @@ mod tests {
             id: 1,
             start_key: b"a".to_vec(),
             end_key: b"m".to_vec(),
-            region_epoch: RegionEpoch::new(1, 1),
+            region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
             peers: vec![Peer {
                 id: 1,
                 store_id: 1,
@@ -165,7 +166,7 @@ mod tests {
             id: 2,
             start_key: b"m".to_vec(),
             end_key: vec![],
-            region_epoch: RegionEpoch::new(1, 1),
+            region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
             peers: vec![Peer {
                 id: 2,
                 store_id: 1,
@@ -192,7 +193,7 @@ mod tests {
             id: 1,
             start_key: b"a".to_vec(),
             end_key: b"m".to_vec(),
-            region_epoch: RegionEpoch::new(1, 1),
+            region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
             peers: vec![Peer {
                 id: 1,
                 store_id: 1,

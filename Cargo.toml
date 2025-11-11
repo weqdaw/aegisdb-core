@@ -5,6 +5,7 @@ edition = "2021"
 build = "build.rs"
 
 [dependencies]
+axum = "0.7"
 rocksdb = "0.21"
 async-trait = "0.1"
 anyhow = "1.0"
@@ -25,6 +26,8 @@ tonic = "0.11"
 prost = "0.12"
 prost-types = "0.12"
 clap = { version = "4.4", features = ["derive"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = "0.11"
@@ -47,3 +50,7 @@ path = "src/bin/aegisdb_cli.rs"
 [[bin]]
 name = "aegisdb_test"
 path = "src/main.rs"
+
+[[bin]]
+name = "pd_server"
+path = "src/bin/pd_server.rs"

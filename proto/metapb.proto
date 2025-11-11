@@ -18,3 +18,15 @@ message Peer {
     uint64 id = 1;
     uint64 store_id = 2;
 }
+
+enum StoreState {
+    Up = 0;
+    Offline = 1;
+    Tombstone = 2;
+}
+
+message Store {
+    uint64 id = 1;
+    string address = 2;
+    StoreState state = 3;
+}

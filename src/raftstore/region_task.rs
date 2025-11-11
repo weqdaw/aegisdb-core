@@ -2,6 +2,7 @@ use crate::engine_util::{Engines, util::exceed_end_key};
 use crate::raftstore::meta::{get_region_local_state, write_region_state, write_apply_state, PeerState};
 use crate::engine_util::WriteBatch;
 use serde::{Serialize, Deserialize};
+use prost::Message;
 use anyhow::Result;
 
 /// Region 任务类型
@@ -57,15 +58,14 @@ impl RegionTaskHandler {
         // 读取 region 的元数据
         let region_state = get_region_local_state(&self.engines, region_id)?
             .ok_or_else(|| anyhow::anyhow!("region {} not found", region_id))?;
-        
-        let region = &region_state.region;
+        let region = crate::proto::metapb::Region::decode(&*region_state.region_bytes)?;
         let start_key = &region.start_key;
         let end_key = &region.end_key;
         
         // 快照数据结构
         #[derive(Serialize, Deserialize)]
         struct SnapshotData {
-            region: crate::proto::metapb::Region,
+            region_bytes: Vec<u8>,
             kvs: Vec<(Vec<u8>, Vec<u8>)>,
         }
         
@@ -104,10 +104,9 @@ impl RegionTaskHandler {
         }
         
         // 序列化快照数据
-        let snapshot_data = SnapshotData {
-            region: region.clone(),
-            kvs,
-        };
+        let mut region_buf = Vec::new();
+        region.encode(&mut region_buf)?;
+        let snapshot_data = SnapshotData { region_bytes: region_buf, kvs };
         
         Ok(bincode::serialize(&snapshot_data)?)
     }
@@ -116,12 +115,12 @@ impl RegionTaskHandler {
         // 反序列化快照数据
         #[derive(Serialize, Deserialize)]
         struct SnapshotData {
-            region: crate::proto::metapb::Region,
+            region_bytes: Vec<u8>,
             kvs: Vec<(Vec<u8>, Vec<u8>)>,
         }
         
         let snapshot: SnapshotData = bincode::deserialize(&snapshot_data)?;
-        let region = &snapshot.region;
+        let region = crate::proto::metapb::Region::decode(&*snapshot.region_bytes)?;
         
         // 先调用 destroy_range 清理旧数据
         self.destroy_range(
@@ -137,7 +136,7 @@ impl RegionTaskHandler {
         }
         
         // 更新 region 状态
-        write_region_state(&mut wb, region, PeerState::Normal)?;
+        write_region_state(&mut wb, &region, PeerState::Normal)?;
         
         // 更新 apply_state（使用快照的 index）
         if let Some(apply_state) = crate::raftstore::meta::get_apply_state(&self.engines, region_id)? {

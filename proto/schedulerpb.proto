@@ -1,0 +1,162 @@
+syntax = "proto3";
+package schedulerpb;
+
+import "metapb.proto";
+import "errorpb.proto";
+
+message RequestHeader {
+    uint64 cluster_id = 1;
+    uint64 sender_id = 2;
+}
+
+message ResponseHeader {
+    uint64 cluster_id = 1;
+    errorpb.Error error = 2;
+}
+
+message ChangePeer {
+    metapb.Peer peer = 1;
+    uint32 change_type = 2;
+}
+
+message TransferLeader {
+    metapb.Peer peer = 1;
+}
+
+message RegionHeartbeatRequest {
+    RequestHeader header = 1;
+    metapb.Region region = 2;
+    metapb.Peer leader = 3;
+    repeated metapb.Peer pending_peers = 4;
+    uint64 approximate_size = 5;
+}
+
+message RegionHeartbeatResponse {
+    ResponseHeader header = 1;
+    ChangePeer change_peer = 2;
+    TransferLeader transfer_leader = 3;
+    uint64 region_id = 4;
+    metapb.RegionEpoch region_epoch = 5;
+    metapb.Peer target_peer = 6;
+}
+
+message StoreStats {
+    uint64 store_id = 1;
+    uint64 capacity = 2;
+    uint64 available = 3;
+    uint64 used_size = 4;
+    uint64 region_count = 5;
+    uint64 leader_count = 6;
+}
+
+message StoreHeartbeatRequest {
+    RequestHeader header = 1;
+    StoreStats stats = 2;
+}
+
+message StoreHeartbeatResponse {
+    ResponseHeader header = 1;
+}
+
+message AskSplitRequest {
+    RequestHeader header = 1;
+    metapb.Region region = 2;
+}
+
+message AskSplitResponse {
+    ResponseHeader header = 1;
+    uint64 new_region_id = 2;
+    repeated uint64 new_peer_ids = 3;
+}
+
+message AllocIDRequest {
+    RequestHeader header = 1;
+}
+
+message AllocIDResponse {
+    ResponseHeader header = 1;
+    uint64 id = 2;
+}
+
+message BootstrapRequest {
+    RequestHeader header = 1;
+    metapb.Store store = 2;
+}
+
+message BootstrapResponse {
+    ResponseHeader header = 1;
+}
+
+message IsBootstrappedRequest {
+    RequestHeader header = 1;
+}
+
+message IsBootstrappedResponse {
+    ResponseHeader header = 1;
+    bool bootstrapped = 2;
+}
+
+message PutStoreRequest {
+    RequestHeader header = 1;
+    metapb.Store store = 2;
+}
+
+message PutStoreResponse {
+    ResponseHeader header = 1;
+}
+
+message GetStoreRequest {
+    RequestHeader header = 1;
+    uint64 store_id = 2;
+}
+
+message GetStoreResponse {
+    ResponseHeader header = 1;
+    metapb.Store store = 2;
+}
+
+message GetRegionRequest {
+    RequestHeader header = 1;
+    bytes region_key = 2;
+}
+
+message GetRegionByIDRequest {
+    RequestHeader header = 1;
+    uint64 region_id = 2;
+}
+
+message GetRegionResponse {
+    ResponseHeader header = 1;
+    metapb.Region region = 2;
+    metapb.Peer leader = 3;
+}
+
+message GetMembersRequest {
+    RequestHeader header = 1;
+}
+
+message Member {
+    uint64 member_id = 1;
+    repeated string client_urls = 2;
+    repeated string peer_urls = 3;
+}
+
+message GetMembersResponse {
+    ResponseHeader header = 1;
+    repeated Member members = 2;
+    Member leader = 3;
+}
+
+service Pd {
+    rpc Bootstrap(BootstrapRequest) returns (BootstrapResponse);
+    rpc IsBootstrapped(IsBootstrappedRequest) returns (IsBootstrappedResponse);
+    rpc AllocID(AllocIDRequest) returns (AllocIDResponse);
+    rpc PutStore(PutStoreRequest) returns (PutStoreResponse);
+    rpc GetStore(GetStoreRequest) returns (GetStoreResponse);
+    rpc GetRegion(GetRegionRequest) returns (GetRegionResponse);
+    rpc GetRegionByID(GetRegionByIDRequest) returns (GetRegionResponse);
+    rpc AskSplit(AskSplitRequest) returns (AskSplitResponse);
+    rpc StoreHeartbeat(StoreHeartbeatRequest) returns (StoreHeartbeatResponse);
+    rpc RegionHeartbeat(stream RegionHeartbeatRequest) returns (stream RegionHeartbeatResponse);
+    rpc GetMembers(GetMembersRequest) returns (GetMembersResponse);
+}

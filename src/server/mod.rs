@@ -2,11 +2,12 @@ pub mod epoch;
 pub mod raw_api;
 pub mod multi_level_api;
 pub mod transaction_api;
-pub mod grpc;
+// pub mod grpc;
+pub mod admin_http;
 
 pub use raw_api::RawKvServer;
 pub use transaction_api::TransactionKvServer;
-pub use grpc::TinyKvService;
+// pub use grpc::TinyKvService;
 
 
 use crate::storage::Storage;

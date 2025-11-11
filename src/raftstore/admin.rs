@@ -127,7 +127,7 @@ impl AdminHandler {
         };
 
         // 创建新的 Region Epoch
-        let mut new_epoch = old_region.region_epoch.clone();
+        let mut new_epoch = old_region.region_epoch.clone().unwrap_or_default();
         new_epoch.version += 1;
         new_epoch.conf_ver += 1;
 
@@ -136,7 +136,7 @@ impl AdminHandler {
             id: request.new_region_id,
             start_key: request.split_key.clone(),
             end_key: old_region.end_key.clone(),
-            region_epoch: new_epoch,
+            region_epoch: Some(new_epoch),
             peers,
         };
 
@@ -146,13 +146,13 @@ impl AdminHandler {
     /// 更新原 Region 的范围
     fn update_region_range(&self, region: &Region, split_key: &[u8]) -> Result<Region> {
         // 创建新的 Region Epoch
-        let mut new_epoch = region.region_epoch.clone();
+        let mut new_epoch = region.region_epoch.clone().unwrap_or_default();
         new_epoch.version += 1;
 
         // 更新 Region 的 end_key
         let mut updated_region = region.clone();
         updated_region.end_key = split_key.to_vec();
-        updated_region.region_epoch = new_epoch;
+        updated_region.region_epoch = Some(new_epoch);
 
         // 更新 PeerStorage 中的 Region
         // 注意：这里简化处理，实际应该通过 PeerStorage 来更新
