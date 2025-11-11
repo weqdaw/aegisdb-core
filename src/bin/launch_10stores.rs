@@ -72,6 +72,14 @@ async fn main() -> anyhow::Result<()> {
                     used_size: (20 + store_id) * 1024 * 1024,
                     region_count: 1,
                     leader_count: 1,
+                    healthy: true,
+                    avg_resp_ms: 5 + (store_id % 5),
+                    error_count: (store_id % 3) as u64,
+                    mem_total: 16 * 1024 * 1024 * 1024,
+                    mem_used: ((4 + store_id) * 1024 * 1024 * 1024),
+                    disk_total: 256 * 1024 * 1024 * 1024,
+                    disk_used: ((20 + store_id) * 1024 * 1024 * 1024),
+                    network_state: if store_id % 4 == 0 { "congested".into() } else { "normal".into() },
                 };
                 if let Err(err) = client.store_heartbeat(&stats).await {
                     log::error!("[store {}] store_heartbeat error: {}", store_id, err);

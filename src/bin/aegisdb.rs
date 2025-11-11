@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use aegisdb::{Config, StandaloneStorage, Server, Storage};
+use aegisdb::{Config, Server, Storage, TieredStorage};
 use aegisdb::server::TinyKvService;
 use tonic::transport::Server as TonicServer;
 use tonic::Request;
@@ -87,7 +87,7 @@ async fn run_server(addr: String, db_path: String, admin_addr: String, cluster_i
     config.validate()?;
     
     // 创建存储
-    let storage = StandaloneStorage::new(&config)?;
+    let storage = TieredStorage::new(&config)?;
     storage.start().await?;
     
     println!("Storage initialized successfully");
@@ -95,7 +95,22 @@ async fn run_server(addr: String, db_path: String, admin_addr: String, cluster_i
     
     // 创建服务器
     let server = Server::new(storage);
+    // 启动分层存储后台搬迁任务（从 server 中取出存储 Arc）
+    {
+        let storage_arc = server.storage().clone();
+        let interval = config.rebalance_interval;
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(interval);
+            loop {
+                tick.tick().await;
+                if let Err(e) = storage_arc.rebalance_once().await {
+                    eprintln!("rebalance_once error: {}", e);
+                }
+            }
+        });
+    }
     let service = TinyKvService::new(server);
+
 
     // ========== 管理 HTTP 服务与调度组件（用于前端面板） ==========
     use std::sync::Arc;
@@ -161,7 +176,7 @@ async fn run_server(addr: String, db_path: String, admin_addr: String, cluster_i
         let store_meta = Store {
             id: store_id,
             address: addr.clone(),
-            state: StoreState::Up,
+            state: StoreState::Up as i32,
         };
         cluster.put_store(StoreInfo::new(store_meta.clone()));
 
@@ -172,7 +187,7 @@ async fn run_server(addr: String, db_path: String, admin_addr: String, cluster_i
                 id: store_id * 10 + 1,
                 start_key: b"a".to_vec(),
                 end_key: b"".to_vec(),
-                region_epoch: RegionEpoch::new(1, 1),
+                region_epoch: Some(RegionEpoch { conf_ver: 1, version: 1 }),
                 peers: vec![Peer { id: store_id * 100 + 1, store_id }],
             };
             let mut info = RegionInfo::new(

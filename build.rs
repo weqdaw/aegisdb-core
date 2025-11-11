@@ -8,6 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "proto/metapb.proto",
             "proto/errorpb.proto",
             "proto/schedulerpb.proto",
+            "proto/kvrpcpb.proto",
+            "proto/tinykvpb.proto",
         ],
         &["proto"],
     )?;

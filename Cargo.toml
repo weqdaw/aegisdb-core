@@ -28,6 +28,7 @@ prost-types = "0.12"
 clap = { version = "4.4", features = ["derive"] }
 tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = "0.1"
+sysinfo = "0.30"
 
 [build-dependencies]
 tonic-build = "0.11"

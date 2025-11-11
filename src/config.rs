@@ -23,6 +23,15 @@ pub struct Config {
     pub scheduler_store_heartbeat_tick_interval: Duration,
     pub region_max_size: u64,
     pub region_split_size: u64,
+
+    // 冷热温度三级分层存储
+    pub hot_path: Option<String>,
+    pub warm_path: Option<String>,
+    pub cold_path: Option<String>,
+    pub promote_threshold: u32,         
+    pub demote_threshold: u32,        
+    pub hysteresis: u32,               
+    pub rebalance_interval: Duration,
 }
 
 impl Config {
@@ -56,6 +65,14 @@ impl Config {
             scheduler_store_heartbeat_tick_interval: Duration::from_secs(10),
             region_max_size: 144 * 1024 * 1024, // 144 MB
             region_split_size: 96 * 1024 * 1024, // 96 MB
+
+            hot_path: None,                        // 默认为 None → 走 db_path
+            warm_path: None,
+            cold_path: None,
+            promote_threshold: 10,                 
+            demote_threshold: 2,                  
+            hysteresis: 3,                        
+            rebalance_interval: Duration::from_secs(30),
         }
     }
     
@@ -77,6 +94,14 @@ impl Config {
             scheduler_store_heartbeat_tick_interval: Duration::from_millis(500),
             region_max_size: 144 * 1024 * 1024,
             region_split_size: 96 * 1024 * 1024,
+            // 分层测试默认：不指定路径，阈值更小，加快搬迁节奏
+            hot_path: None,
+            warm_path: None,
+            cold_path: None,
+            promote_threshold: 3,
+            demote_threshold: 1,
+            hysteresis: 1,
+            rebalance_interval: Duration::from_millis(500),
         }
     }
     

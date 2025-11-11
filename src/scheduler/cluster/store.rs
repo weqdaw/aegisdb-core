@@ -14,6 +14,15 @@ pub struct StoreInfo {
     leader_weight: f64,
     region_weight: f64,
     blocked: bool,
+    // extended metrics
+    healthy: bool,
+    avg_resp_ms: u64,
+    error_count: u64,
+    mem_total: u64,
+    mem_used: u64,
+    disk_total: u64,
+    disk_used: u64,
+    network_state: String,
 }
 
 impl StoreInfo {
@@ -29,6 +38,14 @@ impl StoreInfo {
             leader_weight: 1.0,
             region_weight: 1.0,
             blocked: false,
+            healthy: true,
+            avg_resp_ms: 0,
+            error_count: 0,
+            mem_total: 0,
+            mem_used: 0,
+            disk_total: 0,
+            disk_used: 0,
+            network_state: "normal".to_string(),
         }
     }
 
@@ -108,5 +125,53 @@ impl StoreInfo {
 
     pub fn meta(&self) -> &Store {
         &self.meta
+    }
+
+    // getters
+    pub fn healthy(&self) -> bool {
+        self.healthy
+    }
+    pub fn avg_resp_ms(&self) -> u64 {
+        self.avg_resp_ms
+    }
+    pub fn error_count(&self) -> u64 {
+        self.error_count
+    }
+    pub fn mem_total(&self) -> u64 {
+        self.mem_total
+    }
+    pub fn mem_used(&self) -> u64 {
+        self.mem_used
+    }
+    pub fn disk_total(&self) -> u64 {
+        self.disk_total
+    }
+    pub fn disk_used(&self) -> u64 {
+        self.disk_used
+    }
+    pub fn network_state(&self) -> &str {
+        &self.network_state
+    }
+
+    // setters
+    pub fn update_healthy(&mut self, healthy: bool) {
+        self.healthy = healthy;
+    }
+    pub fn update_avg_resp_ms(&mut self, ms: u64) {
+        self.avg_resp_ms = ms;
+    }
+    pub fn update_error_count(&mut self, c: u64) {
+        self.error_count = c;
+    }
+    pub fn update_mem(&mut self, total: u64, used: u64) {
+        self.mem_total = total;
+        self.mem_used = used;
+    }
+    pub fn update_disk(&mut self, total: u64, used: u64) {
+        self.disk_total = total;
+        self.disk_used = used;
+    }
+    pub fn update_network_state(&mut self, s: String) {
+        self.network_state = s;
     }
 }

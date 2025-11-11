@@ -76,7 +76,6 @@ fn to_store_view(s: &StoreInfo) -> ApiStore {
 }
 
 fn to_region_view(r: &RegionInfo) -> ApiRegion {
-    use std::str;
     let start = String::from_utf8_lossy(r.start_key()).to_string();
     let end = String::from_utf8_lossy(r.end_key()).to_string();
     ApiRegion {
@@ -101,6 +100,7 @@ pub async fn serve(state: AppState, addr: &str) -> anyhow::Result<()> {
         .route("/api/regions", get(list_regions))
         .route("/api/operators", get(list_operators))
         .route("/api/storeloads", get(list_store_loads))
+        .route("/api/system", get(get_system))
         .with_state(state)
         .layer(cors);
 
@@ -156,6 +156,50 @@ async fn list_store_loads(State(state): State<AppState>) -> axum::Json<Vec<Store
         region_size: l.region_size,
         leader_size: l.leader_size,
     }).collect())
+}
+
+#[derive(Serialize)]
+struct SystemDisk { name: String, total: u64, used: u64 }
+
+#[derive(Serialize)]
+struct SystemNet { rx_bytes: u64, tx_bytes: u64 }
+
+#[derive(Serialize)]
+struct SystemMetrics {
+    cpu_usage_percent: f32,
+    mem_total: u64,
+    mem_used: u64,
+    disks: Vec<SystemDisk>,
+    net: SystemNet,
+}
+
+async fn get_system() -> axum::Json<SystemMetrics> {
+    use sysinfo::System;
+
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    // CPU usage (global)
+    let cpu = sys.global_cpu_info().cpu_usage();
+
+    // Memory
+    let mem_total = sys.total_memory();
+    let mem_used = sys.used_memory();
+
+    // Disks: keep empty if disk enumeration is unavailable
+    let disks: Vec<SystemDisk> = Vec::new();
+
+    // Network totals (cumulative)
+    let rx: u64 = 0;
+    let tx: u64 = 0;
+
+    axum::Json(SystemMetrics {
+        cpu_usage_percent: cpu,
+        mem_total,
+        mem_used,
+        disks,
+        net: SystemNet { rx_bytes: rx, tx_bytes: tx },
+    })
 }
 
 // 需要在 OperatorController 上补这三个方法，若已有可直接使用；若没有，请在其实现中返回内部队列长度。

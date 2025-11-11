@@ -49,6 +49,15 @@ pub struct StoreStats {
     pub used_size: u64,
     pub region_count: u64,
     pub leader_count: u64,
+    // extended metrics
+    pub healthy: bool,
+    pub avg_resp_ms: u64,
+    pub error_count: u64,
+    pub mem_total: u64,
+    pub mem_used: u64,
+    pub disk_total: u64,
+    pub disk_used: u64,
+    pub network_state: String,
 }
 
 #[derive(Debug, Clone)]

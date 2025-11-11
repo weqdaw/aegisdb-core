@@ -283,39 +283,11 @@ impl<S: Storage + Send + Sync + 'static> TinyKv for TinyKvService<S> {
     }
 }
 
-// 辅助函数：转换错误类型
+// 辅助函数：转换错误类型（跨不同模块生成的相同 proto 结构）
 fn convert_error(e: crate::proto::errorpb::Error) -> errorpb::Error {
-    // 内部 Error 是枚举类型，proto Error 是结构体类型
-    // 简化处理：只设置 message 字段，其他字段为 None
-    let message = match &e {
-        crate::proto::errorpb::Error::NotLeader { region_id, .. } => {
-            format!("NotLeader: region_id={}", region_id)
-        }
-        crate::proto::errorpb::Error::RegionNotFound { region_id } => {
-            format!("RegionNotFound: region_id={}", region_id)
-        }
-        crate::proto::errorpb::Error::KeyNotInRegion { key, region_id, .. } => {
-            format!("KeyNotInRegion: key={:?}, region_id={}", key, region_id)
-        }
-        crate::proto::errorpb::Error::EpochNotMatch { .. } => {
-            "EpochNotMatch".to_string()
-        }
-        crate::proto::errorpb::Error::ServerIsBusy { reason } => {
-            format!("ServerIsBusy: {}", reason)
-        }
-        crate::proto::errorpb::Error::StaleCommand => {
-            "StaleCommand".to_string()
-        }
-        crate::proto::errorpb::Error::StoreNotMatch { request_store_id, actual_store_id } => {
-            format!("StoreNotMatch: request={}, actual={}", request_store_id, actual_store_id)
-        }
-        crate::proto::errorpb::Error::RaftEntryTooLarge { region_id, entry_size } => {
-            format!("RaftEntryTooLarge: region_id={}, size={}", region_id, entry_size)
-        }
-    };
-    
+    // 简化映射：仅拷贝 message，其余详细结构按需后续补充
     errorpb::Error {
-        message,
+        message: e.message,
         not_leader: None,
         region_not_found: None,
         key_not_in_region: None,

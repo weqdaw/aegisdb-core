@@ -127,6 +127,13 @@ impl PdState {
             info.update_leader_count(stats.leader_count as usize);
             info.update_region_size(stats.used_size);
             info.update_leader_size(stats.leader_count); // 简化：无 leader size 统计
+            // extended metrics
+            info.update_healthy(stats.healthy);
+            info.update_avg_resp_ms(stats.avg_resp_ms);
+            info.update_error_count(stats.error_count);
+            info.update_mem(stats.mem_total, stats.mem_used);
+            info.update_disk(stats.disk_total, stats.disk_used);
+            info.update_network_state(stats.network_state.clone());
             self.cluster.put_store(info);
         }
 

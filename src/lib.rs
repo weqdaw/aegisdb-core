@@ -11,7 +11,7 @@ pub mod transaction;
 pub mod pd;
 
 pub use config::Config;
-pub use storage::{Storage, StorageReader, StandaloneStorage, Modify, Put, Delete};
+pub use storage::{Storage, StorageReader, StandaloneStorage, Modify, Put, Delete, TieredStorage};
 pub use engine_util::{Engines, WriteBatch, DBIterator, DBItem};
 pub use server::Server;
 pub use server::raw_api::RawKvServer;

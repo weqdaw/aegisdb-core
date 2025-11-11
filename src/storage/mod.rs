@@ -1,10 +1,12 @@
 pub mod modify;
 pub mod standalone_storage;
 pub mod reader;
+pub mod tiered_storage; 
 
 pub use modify::{Modify, Put, Delete};
 pub use standalone_storage::StandaloneStorage;
 pub use reader::StandaloneReader;
+pub use tiered_storage::TieredStorage;
 
 use async_trait::async_trait;
 use crate::engine_util::DBIterator;
