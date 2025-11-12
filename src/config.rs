@@ -69,9 +69,9 @@ impl Config {
             hot_path: None,                        // 默认为 None → 走 db_path
             warm_path: None,
             cold_path: None,
-            promote_threshold: 10,                 
-            demote_threshold: 2,                  
-            hysteresis: 3,                        
+            promote_threshold: 3,                 
+            demote_threshold: 1,                  
+            hysteresis: 1,                        
             rebalance_interval: Duration::from_secs(30),
         }
     }
