@@ -11,6 +11,7 @@ use tower_http::cors::CorsLayer;
 use rand::Rng;
 use clap::Parser;
 use rocksdb::{Options, DB, IteratorMode};
+use redis::AsyncCommands;
 
 // ---------------------- 金融领域的示例数据结构与生成 ----------------------
 #[derive(Serialize, Clone)]
@@ -165,6 +166,16 @@ struct AppState {
     metrics: Arc<Mutex<Metrics>>,
     worker: Arc<Mutex<Option<JoinHandle<()>>>>,
     inspector: Arc<TierInspector>,
+    migration_progress: Arc<Mutex<MigrationProgress>>,  // 新增
+}
+
+#[derive(Serialize, Clone, Default)]
+struct MigrationProgress {
+    total: u64,
+    migrated: u64,
+    failed: u64,
+    status: String,  // "idle", "running", "completed", "error"
+    error: Option<String>,
 }
 
 impl AppState {
@@ -176,6 +187,7 @@ impl AppState {
             metrics: Arc::new(Mutex::new(Metrics::default())),
             worker: Arc::new(Mutex::new(None)),
             inspector: Arc::new(inspector),
+            migration_progress: Arc::new(Mutex::new(MigrationProgress::default())),  // 新增
         }
     }
 }
@@ -288,6 +300,34 @@ struct StartBody {
     kind: Option<String>,     // txn/account/quote，默认 txn
 }
 
+#[derive(Deserialize)]
+struct KvOperation {
+    op: String,      // "put", "get", "delete"
+    cf: Option<String>,  // 默认 "default"
+    key: String,
+    value: Option<String>,  // PUT 操作需要
+}
+
+#[derive(Serialize)]
+struct KvResponse {
+    success: bool,
+    message: String,
+    data: Option<String>,  // GET 操作返回的值
+}
+
+#[derive(Deserialize)]
+struct MigrationRequest {
+    redis_url: Option<String>,  // 默认 "redis://127.0.0.1:6379"
+    prefix: Option<String>,     // 可选：只迁移特定前缀的key
+}
+
+#[derive(Serialize)]
+struct MigrationResponse {
+    success: bool,
+    message: String,
+    progress: MigrationProgress,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
@@ -305,6 +345,9 @@ async fn main() -> anyhow::Result<()> {
     .route("/api/biz/metrics", get(get_metrics))
     .route("/api/biz/events", get(get_events))
     .route("/api/storage/tiers", get(get_tier_snapshot))
+    .route("/api/kv/execute", post(execute_kv_operation))
+    .route("/api/migration/start", post(start_migration))      // 新增
+    .route("/api/migration/progress", get(get_migration_progress))  // 新增
     .with_state(state)
     .layer({
         // 允许来自前端开发端口的跨域
@@ -438,6 +481,284 @@ async fn get_tier_snapshot(State(state): State<AppState>) -> Result<Json<TierSna
             eprintln!("tier snapshot read error: {err}");
             StatusCode::INTERNAL_SERVER_ERROR
         })
+}
+
+async fn execute_kv_operation(
+    State(state): State<AppState>,
+    Json(body): Json<KvOperation>,
+) -> Result<Json<KvResponse>, StatusCode> {
+    let cf = body.cf.unwrap_or_else(|| "default".to_string());
+    let ctx = Some(Context {
+        region_id: 1,
+        region_epoch: None,
+        peer: None,
+        term: 0,
+    });
+
+    let mut client = match TinyKvClient::connect(state.server_addr.clone()).await {
+        Ok(c) => c,
+        Err(e) => {
+            return Ok(Json(KvResponse {
+                success: false,
+                message: format!("连接失败: {}", e),
+                data: None,
+            }));
+        }
+    };
+
+    let t0 = Instant::now();
+    let result = match body.op.as_str() {
+        "put" => {
+            if let Some(value) = body.value {
+                let val_bytes = value.as_bytes().to_vec();
+                let res = client
+                    .raw_put(RawPutRequest {
+                        context: ctx.clone(),
+                        key: body.key.as_bytes().to_vec(),
+                        value: val_bytes,
+                        cf: cf.clone(),
+                    })
+                    .await;
+                if res.is_ok() {
+                    record(
+                        &state,
+                        "put",
+                        &body.key,
+                        true,
+                        t0.elapsed().as_millis(),
+                        None,
+                        None,
+                        Some(truncate_for_event(&value, 200).to_string()),
+                    )
+                    .await;
+                    Ok(KvResponse {
+                        success: true,
+                        message: "PUT 操作成功".to_string(),
+                        data: None,
+                    })
+                } else {
+                    let err = res.err().unwrap();
+                    record_err(&state, "put", &body.key, &err.to_string()).await;
+                    Ok(KvResponse {
+                        success: false,
+                        message: format!("PUT 操作失败: {}", err),
+                        data: None,
+                    })
+                }
+            } else {
+                Ok(KvResponse {
+                    success: false,
+                    message: "PUT 操作需要提供 value 参数".to_string(),
+                    data: None,
+                })
+            }
+        }
+        "get" => {
+            let res = client
+                .raw_get(RawGetRequest {
+                    context: ctx.clone(),
+                    key: body.key.as_bytes().to_vec(),
+                    cf: cf.clone(),
+                })
+                .await;
+            match res {
+                Ok(response) => {
+                    let resp = response.into_inner();
+                    let value = if resp.not_found {
+                        "null".to_string()
+                    } else {
+                        String::from_utf8_lossy(&resp.value).to_string()
+                    };
+                    record(
+                        &state,
+                        "get",
+                        &body.key,
+                        true,
+                        t0.elapsed().as_millis(),
+                        None,
+                        None,
+                        Some(truncate_for_event(&value, 200).to_string()),
+                    )
+                    .await;
+                    Ok(KvResponse {
+                        success: true,
+                        message: "GET 操作成功".to_string(),
+                        data: Some(value),
+                    })
+                }
+                Err(e) => {
+                    record_err(&state, "get", &body.key, &e.to_string()).await;
+                    Ok(KvResponse {
+                        success: false,
+                        message: format!("GET 操作失败: {}", e),
+                        data: None,
+                    })
+                }
+            }
+        }
+        "delete" => {
+            let res = client
+                .raw_delete(RawDeleteRequest {
+                    context: ctx.clone(),
+                    key: body.key.as_bytes().to_vec(),
+                    cf: cf.clone(),
+                })
+                .await;
+            if res.is_ok() {
+                record(
+                    &state,
+                    "del",
+                    &body.key,
+                    true,
+                    t0.elapsed().as_millis(),
+                    None,
+                    None,
+                    None,
+                )
+                .await;
+                Ok(KvResponse {
+                    success: true,
+                    message: "DELETE 操作成功".to_string(),
+                    data: None,
+                })
+            } else {
+                let err = res.err().unwrap();
+                record_err(&state, "del", &body.key, &err.to_string()).await;
+                Ok(KvResponse {
+                    success: false,
+                    message: format!("DELETE 操作失败: {}", err),
+                    data: None,
+                })
+            }
+        }
+        _ => Ok(KvResponse {
+            success: false,
+            message: format!("不支持的操作类型: {}", body.op),
+            data: None,
+        }),
+    };
+
+    result.map(Json)
+}
+
+async fn start_migration(
+    State(state): State<AppState>,
+    Json(body): Json<MigrationRequest>,
+) -> Result<Json<MigrationResponse>, StatusCode> {
+    // 检查是否已有迁移任务在运行
+    let mut progress = state.migration_progress.lock().await;
+    if progress.status == "running" {
+        return Ok(Json(MigrationResponse {
+            success: false,
+            message: "迁移任务已在运行中".to_string(),
+            progress: progress.clone(),
+        }));
+    }
+
+    let redis_url = body.redis_url.unwrap_or_else(|| "redis://127.0.0.1:6379".to_string());
+    let prefix = body.prefix.clone();
+
+    // 重置进度
+    *progress = MigrationProgress {
+        total: 0,
+        migrated: 0,
+        failed: 0,
+        status: "running".to_string(),  // 已经是 String，正确
+        error: None,
+    };
+    let state_clone = state.clone();
+
+    // 启动迁移任务
+    tokio::spawn(async move {
+        if let Err(e) = migrate_to_redis(&state_clone, &redis_url, prefix.as_deref()).await {
+            let mut p = state_clone.migration_progress.lock().await;
+            p.status = "error".to_string();
+            p.error = Some(e.to_string());
+        } else {
+            let mut p = state_clone.migration_progress.lock().await;
+            p.status = "completed".to_string();
+        }
+    });
+
+    Ok(Json(MigrationResponse {
+        success: true,
+        message: "迁移任务已启动".to_string(),
+        progress: progress.clone(),
+    }))
+}
+
+async fn get_migration_progress(
+    State(state): State<AppState>,
+) -> Json<MigrationProgress> {
+    Json(state.migration_progress.lock().await.clone())
+}
+
+async fn migrate_to_redis(
+    state: &AppState,
+    redis_url: &str,
+    prefix_filter: Option<&str>,
+) -> anyhow::Result<()> {
+    // 连接 Redis - 使用 anyhow::Result，不需要转换为 StatusCode
+    let client = redis::Client::open(redis_url)
+        .map_err(|e| anyhow::anyhow!("Redis 连接失败: {}", e))?;
+    let mut conn = client.get_async_connection().await
+        .map_err(|e| anyhow::anyhow!("Redis 异步连接失败: {}", e))?;
+
+    // 获取所有层的数据
+    let snapshot = state.inspector.collect()?;
+    
+    // 统计总数
+    let total = snapshot.hot.len() + snapshot.warm.len() + snapshot.cold.len();
+    {
+        let mut progress = state.migration_progress.lock().await;
+        progress.total = total as u64;
+    }
+
+    // 合并所有层的数据
+    let mut all_entries = Vec::new();
+    all_entries.extend(snapshot.hot);
+    all_entries.extend(snapshot.warm);
+    all_entries.extend(snapshot.cold);
+
+    // 如果指定了前缀过滤，进行过滤
+    let entries_to_migrate: Vec<_> = if let Some(prefix) = prefix_filter {
+        all_entries.into_iter()
+            .filter(|e| e.key.starts_with(prefix))
+            .collect()
+    } else {
+        all_entries
+    };
+
+    // 更新总数（过滤后）
+    {
+        let mut progress = state.migration_progress.lock().await;
+        progress.total = entries_to_migrate.len() as u64;
+    }
+
+    // 迁移数据 - 直接使用 set，不使用事务
+    for entry in entries_to_migrate {
+        // 构建 Redis key（包含 CF 信息）
+        let redis_key = if entry.cf == "default" {
+            entry.key.clone()
+        } else {
+            format!("{}:{}", entry.cf, entry.key)
+        };
+
+        // 写入 Redis - 使用 set 方法，value 应该是字符串或字节
+        match conn.set::<_, _, ()>(&redis_key, entry.value.as_str()).await {
+            Ok(_) => {
+                let mut progress = state.migration_progress.lock().await;
+                progress.migrated += 1;
+            }
+            Err(e) => {
+                eprintln!("迁移 key {} 失败: {}", redis_key, e);
+                let mut progress = state.migration_progress.lock().await;
+                progress.failed += 1;
+            }
+        }
+    }
+
+    Ok(())
 }
 
 fn rand_bool(p: f32) -> bool {
