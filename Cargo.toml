@@ -30,6 +30,7 @@ tower-http = { version = "0.5", features = ["cors", "trace"] }
 tokio-stream = "0.1"
 sysinfo = "0.30"
 chrono = "0.4"
+colored = "2"
 
 [build-dependencies]
 tonic-build = "0.11"
